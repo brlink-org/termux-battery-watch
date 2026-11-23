@@ -8,11 +8,11 @@ Funciona **sem root** e **sem cron**. Usa preferencialmente o aplicativo **Termu
 
 | Evento | Condição inicial padrão | Comportamento |
 | --- | --- | --- |
-| Bateria baixa | **30% ou menos**, sem carregador | Avisa uma vez; rearma acima de **33%** |
+| Bateria baixa | **30% ou menos**, desconectado ou sem alimentação confirmada | Avisa uma vez; rearma acima de **33%** |
 | Carregador conectado | Transição para fonte de energia conectada, antes de 100% | Avisa uma vez por conexão |
 | Carga completa | **100%** | Avisa uma vez; rearma abaixo de **98%** |
 
-A verificação ocorre a cada **60 segundos** (configurável). Ao iniciar o monitor com o carregador já conectado ou a carga já completa, esses dois avisos de transição são silenciados. **Bateria baixa** pode gerar aviso imediatamente.
+A verificação ocorre a cada **60 segundos** (configurável). Ao iniciar o monitor com o carregador já conectado ou a carga já completa, esses dois avisos de transição são silenciados. **Bateria baixa** pode gerar aviso imediatamente, incluindo quando a origem da alimentação é desconhecida (mensagem neutra). Um estado `NOT_CHARGING` não significa automaticamente que o cabo esteja desconectado.
 
 > **Importante:** o projeto depende de uma Evolution API acessível e de uma instância WhatsApp conectada. O sucesso HTTP confirma que a requisição foi aceita pela API, **não** comprova a entrega ao destinatário.
 
@@ -233,7 +233,7 @@ Verifique se `DRY=1` não está ativo, se os dados da API estão corretos, se a 
 tail -n 50 ~/.battery-watch.log
 ```
 
-O monitor **não envia uma mensagem apenas porque foi iniciado**. Se o envio falhar, ele tenta novamente na próxima leitura, enquanto a condição persistir.
+O monitor **não envia uma mensagem apenas porque foi iniciado**, exceto aviso de bateria baixa. Se o envio falhar, ele tenta novamente na próxima leitura, enquanto a condição persistir.
 
 ### Alterei o token da Evolution API
 

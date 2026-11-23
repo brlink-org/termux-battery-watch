@@ -37,7 +37,7 @@ erro() { printf 'ERRO: %s\n' "$*" >&2; exit 2; }
 # Retorna: percentual STATUS PLUGGED (sem espacos internos).
 # Exemplo: 42 CHARGING PLUGGED_AC
 bateria() {
-  local j dados d tipo cap status plug p fonte online
+  local j dados d tipo cap status plug p fonte online origem
   if command -v termux-battery-status >/dev/null 2>&1 && \
      command -v timeout >/dev/null 2>&1 && \
      command -v jq >/dev/null 2>&1; then
@@ -46,7 +46,8 @@ bateria() {
         'if (.percentage | type) == "number" then "\(.percentage | floor) \(.status // "UNKNOWN") \(.plugged // "UNKNOWN")" else empty end' \
         2>/dev/null)" || dados=""
       if [[ -n "$dados" ]]; then
-        printf '%s\n' "$dados"
+        # A origem API permite diferenciar dados confirmados de inferencias do kernel.
+        printf '%s API\n' "$dados"
         return 0
       fi
     fi
@@ -62,7 +63,9 @@ bateria() {
     status="$(cat "$d/status" 2>/dev/null)" || continue
     status="${status^^}"
     status="${status// /_}"
+    # A leitura do status apenas sugere a fonte; nao confirma o cabo.
     plug="UNKNOWN"
+    origem="SYSFS_INFERIDO"
     case "$status" in
       CHARGING|FULL) plug="PLUGGED_OTHER" ;;
       DISCHARGING) plug="UNPLUGGED" ;;
@@ -72,9 +75,13 @@ bateria() {
       fonte="$(cat "${p%/online}/type" 2>/dev/null)" || continue
       [[ "${fonte,,}" == battery ]] && continue
       online="$(cat "$p" 2>/dev/null)" || continue
-      if [[ "$online" == 1 ]]; then plug="PLUGGED_OTHER"; break; fi
+      if [[ "$online" == 1 ]]; then
+        plug="PLUGGED_OTHER"
+        origem="SYSFS_ONLINE"
+        break
+      fi
     done
-    printf '%s %s %s\n' "$cap" "$status" "$plug"
+    printf '%s %s %s %s\n' "$cap" "$status" "$plug" "$origem"
     return 0
   done
   return 1
@@ -83,7 +90,7 @@ bateria() {
 # Inspecao sem rede nem alteracao de estado, mesmo sem configuracao da Evolution.
 if [[ "$MODO" == --status ]]; then
   if saida="$(bateria)"; then
-    read -r CAP STATUS PLUG <<< "$saida"
+    read -r CAP STATUS PLUG ORIGEM <<< "$saida"
     printf 'Bateria: %s%% | status: %s | fonte: %s\n' "$CAP" "$STATUS" "$PLUG"
     exit 0
   fi
@@ -204,20 +211,29 @@ while :; do
     sleep "$INTERVALO"
     continue
   fi
-  read -r CAP STATUS FONTE <<< "$leitura"
+  read -r CAP STATUS FONTE ORIGEM <<< "$leitura"
   if [[ ! "$CAP" =~ ^[0-9]{1,3}$ ]] || (( 10#$CAP > 100 )); then
     log "leitura invalida cap='$CAP' status='$STATUS'"
     sleep "$INTERVALO"
     continue
   fi
 
-  # O campo plugged prevalece sobre status, inclusive em NOT_CHARGING.
+  # A fonte conectada/desconectada so e confirmada com dado explicito.
+  # PLUGGED_-1 indica informacao desconhecida, jamais conexao confirmada.
   PLUGADO='desconhecido'
+  CONEXAO_CONFIRMADA=0
   case "$FONTE" in
-    PLUGGED_*) PLUGADO=1 ;;
-    UNPLUGGED) PLUGADO=0 ;;
+    PLUGGED_AC|PLUGGED_USB|PLUGGED_WIRELESS|PLUGGED_DOCK)
+      PLUGADO=1; CONEXAO_CONFIRMADA=1 ;;
+    UNPLUGGED)
+      PLUGADO=0
+      [[ "$ORIGEM" == API ]] && CONEXAO_CONFIRMADA=1 ;;
+    PLUGGED_OTHER)
+      PLUGADO=1
+      [[ "$ORIGEM" == SYSFS_ONLINE ]] && CONEXAO_CONFIRMADA=1 ;;
   esac
   if [[ "$PLUGADO" == desconhecido ]]; then
+    # Este estado e apenas inferido: nao rearma o aviso de conexao.
     case "$STATUS" in
       CHARGING|FULL) PLUGADO=1 ;;
       DISCHARGING) PLUGADO=0 ;;
@@ -228,19 +244,32 @@ while :; do
     # Nao avisa transicoes anteriores ao inicio; bateria baixa avisa ja.
     [[ "$PLUGADO" == 1 ]] && grava plugado_avisado 1
     (( 10#$CAP >= 10#$LIMIAR_CHEIO )) && grava cheio_avisado 1
-    log "baseline cap=$CAP status=$STATUS fonte=$FONTE plugado=$PLUGADO"
+    log "baseline cap=$CAP status=$STATUS fonte=$FONTE origem=$ORIGEM plugado=$PLUGADO confirmado=$CONEXAO_CONFIRMADA"
     PRIMEIRA=0
   fi
 
-  if (( 10#$CAP <= 10#$LIMIAR_BAIXO )) && [[ "$PLUGADO" == 0 ]] && [[ "$(ler baixo_avisado)" != 1 ]]; then
-    if envia "🔋 Bateria baixa: ${CAP}% (descarregando). Coloque para carregar."; then grava baixo_avisado 1; fi
+  # Mesmo sem fonte identificada, bateria baixa precisa gerar um aviso.
+  # Com fonte conectada e DISCHARGING, avisar que a carga nao acompanha o uso.
+  if (( 10#$CAP <= 10#$LIMIAR_BAIXO )) &&
+     [[ "$PLUGADO" != 1 || "$STATUS" == DISCHARGING ]] &&
+     [[ "$(ler baixo_avisado)" != 1 ]]; then
+    if [[ "$PLUGADO" == 1 ]]; then
+      aviso="🔋 Bateria baixa: ${CAP}% apesar da fonte conectada. Verifique o carregamento."
+    elif [[ "$PLUGADO" == 0 ]]; then
+      aviso="🔋 Bateria baixa: ${CAP}% (descarregando). Coloque para carregar."
+    else
+      aviso="🔋 Bateria baixa: ${CAP}%. Nao foi possivel confirmar a alimentacao."
+    fi
+    if envia "$aviso"; then grava baixo_avisado 1; fi
   fi
   if (( 10#$CAP > 10#$LIMIAR_RESET )); then grava baixo_avisado 0; fi
 
-  if [[ "$PLUGADO" == 1 ]] && (( 10#$CAP < 10#$LIMIAR_CHEIO )) && [[ "$(ler plugado_avisado)" != 1 ]]; then
+  if [[ "$PLUGADO" == 1 && "$CONEXAO_CONFIRMADA" == 1 ]] &&
+     (( 10#$CAP < 10#$LIMIAR_CHEIO )) && [[ "$(ler plugado_avisado)" != 1 ]]; then
     if envia "🔌 Carregador conectado — bateria em ${CAP}%."; then grava plugado_avisado 1; fi
   fi
-  [[ "$PLUGADO" == 0 ]] && grava plugado_avisado 0
+  # Nunca considerar fonte indeterminada como uma desconexao comprovada.
+  [[ "$PLUGADO" == 0 && "$CONEXAO_CONFIRMADA" == 1 ]] && grava plugado_avisado 0
 
   if (( 10#$CAP >= 10#$LIMIAR_CHEIO )) && [[ "$(ler cheio_avisado)" != 1 ]]; then
     if envia "✅ Bateria em ${CAP}% — carga completa, pode desconectar."; then grava cheio_avisado 1; fi
