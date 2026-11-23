@@ -104,7 +104,7 @@ LIMIAR_CHEIO=100
 LIMIAR_CHEIO_RESET=98
 ```
 
-- `EVO_URL`: URL base da Evolution API, de preferência com **HTTPS**.
+- `EVO_URL`: URL base da Evolution API. **HTTPS obrigatório** para servidores externos. HTTP só é aceito em loopback (`127.0.0.1`, `localhost` ou `[::1]`), com `BATWATCH_ALLOW_HTTP_LOOPBACK=1` para testes locais.
 - `EVO_TOKEN`: chave de API autorizada para envio de mensagens (`apikey`).
 - `EVO_INSTANCE`: nome da instância conectada.
 - `DESTINO`: número internacional apenas com dígitos, por exemplo `55` + DDD + número do celular.
@@ -254,8 +254,8 @@ Em seguida, inicie o monitor novamente.
 
 - **Não publique tokens, números pessoais ou logs de produção** em issues ou commits.
 - O arquivo `~/.battery-watch.conf` é interpretado como código Bash; edite somente configurações de origem confiável.
-- Prefira uma instância Evolution em **HTTPS** e credenciais com acesso restrito.
-- O token não é passado como argumento do processo `curl`; ele é gravado em `~/.battery-watch.curlrc` com permissão `600`.
+- Use uma instância Evolution em **HTTPS** e credenciais com acesso restrito. A opção de HTTP local existe somente para testes explicitamente autorizados.
+- O token não é passado como argumento do processo `curl`; ele é gravado em `~/.battery-watch.curlrc` com permissão `600`. O comando utiliza `curl -q` para ignorar opções da configuração global `~/.curlrc` e não segue redirecionamentos automaticamente.
 - Mensagens aceitas por HTTP **2xx** não representam garantia de entrega pelo WhatsApp.
 - O monitor depende de bateria, conectividade, disponibilidade da API e políticas de execução em segundo plano do Android.
 - O projeto **não é** um sistema de segurança ou alerta crítico com alta disponibilidade.

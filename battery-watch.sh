@@ -102,7 +102,34 @@ done
 (( 10#$LIMIAR_CHEIO_RESET < 10#$LIMIAR_CHEIO )) || erro 'LIMIAR_CHEIO_RESET precisa ser menor que LIMIAR_CHEIO'
 [[ "$DRY" == 0 || "$DRY" == 1 ]] || erro 'DRY deve ser 0 ou 1'
 [[ "$DESTINO" =~ ^[0-9]{10,15}$ ]] || erro 'DESTINO deve ter entre 10 e 15 digitos, sem +'
-[[ "$EVO_URL" =~ ^https?:// ]] || erro 'EVO_URL deve comecar com https:// ou http://'
+# Valida a URL completa antes de preparar qualquer credencial.
+# HTTP e permitido somente em testes locais, quando autorizado explicitamente.
+validar_url() {
+  local esquema autoridade host porta
+  if [[ "$EVO_URL" =~ ^(https?)://([^/?#]+)(/[^?#]*)?$ ]]; then
+    esquema="${BASH_REMATCH[1]}"
+    autoridade="${BASH_REMATCH[2]}"
+  else
+    erro 'EVO_URL invalida: informe endereco com protocolo, host e sem parametros'
+  fi
+  [[ "$autoridade" != *'@'* ]] || erro 'EVO_URL nao pode conter credenciais'
+  if [[ "$autoridade" =~ ^(\[[[:xdigit:]:]+\]|[A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    porta="${BASH_REMATCH[3]:-}"
+  else
+    erro 'EVO_URL contem host ou porta invalida'
+  fi
+  if [[ -n "$porta" ]]; then
+    (( 10#$porta >= 1 && 10#$porta <= 65535 )) || erro 'EVO_URL contem porta fora do intervalo'
+  fi
+  if [[ "$esquema" == http ]]; then
+    [[ "${BATWATCH_ALLOW_HTTP_LOOPBACK:-0}" == 1 &&
+       ( "$host" == localhost || "$host" == 127.0.0.1 || "$host" == '[::1]' ) ]] ||
+      erro 'HTTP e permitido apenas em loopback com BATWATCH_ALLOW_HTTP_LOOPBACK=1'
+  fi
+  EVO_PROTO="$esquema"
+}
+validar_url
 command -v jq >/dev/null 2>&1 || erro 'instale jq: pkg install jq'
 command -v curl >/dev/null 2>&1 || erro 'instale curl: pkg install curl'
 command -v flock >/dev/null 2>&1 || erro 'instale flock: pkg install util-linux'
@@ -148,7 +175,10 @@ envia() {
     return 0
   fi
   payload="$(jq -cn --arg number "$DESTINO" --arg text "$msg" '{number:$number,text:$text}')" || return 1
-  http="$(curl -sS --connect-timeout 8 --max-time 25 -K "$CURLRC" \
+  # -q deve ser a primeira opcao: ignora ~/.curlrc, mas preserva o -K privado.
+  # Nao seguir redirecionamentos nem permitir outro protocolo de transporte.
+  http="$(curl -q --proto "=$EVO_PROTO" --proto-redir "=$EVO_PROTO" \
+    --max-redirs 0 -sS --connect-timeout 8 --max-time 25 -K "$CURLRC" \
     -X POST "$EVO_URL/message/sendText/$EVO_INSTANCE" \
     --data-binary "$payload" -o /dev/null -w '%{http_code}')"
   rc=$?
