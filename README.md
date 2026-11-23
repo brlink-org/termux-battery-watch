@@ -109,6 +109,7 @@ LIMIAR_CHEIO_RESET=98
 - `EVO_INSTANCE`: nome da instância conectada. Nomes com espaços e Unicode são codificados com segurança na URL; separadores de caminho (`/`, `?`, `#`, `%`) e caracteres de controle são rejeitados antes do envio.
 - `DESTINO`: número internacional apenas com dígitos, por exemplo `55` + DDD + número do celular.
 - `INTERVALO`: intervalo entre leituras em segundos.
+- `BATWATCH_LOG_MAX_BYTES`: tamanho máximo de cada log em bytes (padrão 1048576 = 1 MB); são mantidos dois históricos por modo.
 - Limiares: percentuais configuráveis e seus pontos de rearme (**histerese**).
 
 Proteja a configuração:
@@ -139,12 +140,12 @@ Depois teste a lógica dos eventos sem chamadas HTTP:
 DRY=1 ~/bin/battery-watch.sh
 ```
 
-O modo `DRY=1` **não executa `curl`** e usa `~/.battery-watch.state.dry` e `~/.battery-watch.lock.dry`, separados dos arquivos de produção. Se o aparelho estiver acima de 30% e não houver transição de carregamento, nenhum alerta aparecerá imediatamente: isso é esperado. Para testar, provoque uma transição real conectando ou desconectando o carregador, ou ajuste os limiares para um teste controlado.
+O modo `DRY=1` **não executa `curl`** e usa `~/.battery-watch.state.dry`, `~/.battery-watch.lock.dry` e `~/.battery-watch.log.dry`, separados dos arquivos de produção. Se o aparelho estiver acima de 30% e não houver transição de carregamento, nenhum alerta aparecerá imediatamente: isso é esperado. Para testar, provoque uma transição real conectando ou desconectando o carregador, ou ajuste os limiares para um teste controlado.
 
 Em outra sessão do Termux, acompanhe:
 
 ```bash
-tail -f ~/.battery-watch.log
+tail -F ~/.battery-watch.log.dry
 ```
 
 Interrompa o teste com **Ctrl+C**. O estado de teste pode ser zerado com `rm ~/.battery-watch.state.dry` após parar o processo.
@@ -160,15 +161,17 @@ Com a Evolution API e o destino configurados, execute:
 Para manter em segundo plano:
 
 ```bash
-nohup "$HOME/bin/battery-watch.sh" >> "$HOME/.battery-watch.log" 2>&1 &
+nohup "$HOME/bin/battery-watch.sh" >/dev/null 2>&1 &
 ```
+
+O monitor escreve seus próprios eventos em `~/.battery-watch.log` e faz rotação interna. O redirecionamento do `nohup` vai para `/dev/null` para não manter um descritor aberto no log renomeado. **Antes de usar em segundo plano**, execute uma vez em primeiro plano para confirmar que não há erros de configuração; os erros iniciais aparecem no terminal.
 
 O script solicita `termux-wake-lock`, faz a leitura periodicamente e usa `flock` para impedir duas instâncias simultâneas. **Não é necessário executar `termux-wake-lock` separadamente** para esse monitor.
 
 Para observar e encerrar:
 
 ```bash
-tail -f ~/.battery-watch.log
+tail -F ~/.battery-watch.log
 pgrep -af battery-watch.sh
 pkill -f battery-watch.sh
 ```
@@ -186,7 +189,7 @@ mkdir -p ~/.termux/boot
 cat > ~/.termux/boot/start-battery-watch <<'SCRIPT'
 #!/data/data/com.termux/files/usr/bin/sh
 sleep 20
-nohup "$HOME/bin/battery-watch.sh" >> "$HOME/.battery-watch.log" 2>&1 &
+nohup "$HOME/bin/battery-watch.sh" >/dev/null 2>&1 &
 SCRIPT
 chmod 700 ~/.termux/boot/start-battery-watch
 ```
@@ -211,7 +214,8 @@ Para reduzir interrupções pelo Android, considere nas configurações do apare
 | `~/.battery-watch.state` | Estado dos alertas de produção |
 | `~/.battery-watch.state.dry` | Estado isolado dos testes |
 | `~/.battery-watch.lock.dry` | Bloqueio isolado de processos em modo de teste |
-| `~/.battery-watch.log` | Histórico das ações e falhas |
+| `~/.battery-watch.log` | Histórico da produção, rotacionado em 1 MB por padrão (duas cópias `.1` e `.2`) |
+| `~/.battery-watch.log.dry` | Histórico separado dos testes (`DRY=1`), com rotação independente |
 | `~/.battery-watch.lock` | Bloqueio contra monitores simultâneos |
 
 Arquivos que contêm dados de configuração e credenciais são gravados com permissões restritas (`600`) no diretório privado do Termux.

@@ -30,8 +30,38 @@ STATE="${BATWATCH_STATE:-$HOME/.battery-watch.state}"
 LOG="${BATWATCH_LOG:-$HOME/.battery-watch.log}"
 CURLRC="${BATWATCH_CURLRC:-$HOME/.battery-watch.curlrc}"
 LOCK="${BATWATCH_LOCK:-$HOME/.battery-watch.lock}"
+LOG_MAX_BYTES="${BATWATCH_LOG_MAX_BYTES:-1048576}"
+ULTIMO_LOG=''
+LOG_REPETICOES=0
 
-log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
+escrever_log() {
+  local tamanho=0
+  [[ -f "$LOG" ]] && tamanho="$(wc -c < "$LOG" 2>/dev/null || printf 0)"
+  if (( tamanho >= 10#$LOG_MAX_BYTES )); then
+    # O monitor abre o arquivo a cada escrita; dois historicos bastam.
+    [[ ! -f "${LOG}.1" ]] || mv -f "${LOG}.1" "${LOG}.2"
+    mv -f "$LOG" "${LOG}.1" || return 1
+  fi
+  printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"
+}
+
+log() {
+  local msg="$*"
+  if [[ "$msg" == "$ULTIMO_LOG" ]]; then
+    LOG_REPETICOES=$(( LOG_REPETICOES + 1 ))
+    # Registra periodicamente a repeticao, sem poluir a cada ciclo.
+    if (( LOG_REPETICOES % 60 == 0 )); then
+      escrever_log "REPETIDO ${LOG_REPETICOES} vezes: $msg"
+    fi
+    return 0
+  fi
+  if (( LOG_REPETICOES > 0 )); then
+    escrever_log "RESUMO: $ULTIMO_LOG repetido $LOG_REPETICOES vezes adicionais"
+  fi
+  ULTIMO_LOG="$msg"
+  LOG_REPETICOES=0
+  escrever_log "$msg"
+}
 erro() { printf 'ERRO: %s\n' "$*" >&2; exit 2; }
 
 # Retorna: percentual STATUS PLUGGED (sem espacos internos).
@@ -108,6 +138,9 @@ done
 (( 10#$LIMIAR_RESET > 10#$LIMIAR_BAIXO )) || erro 'LIMIAR_RESET precisa superar LIMIAR_BAIXO'
 (( 10#$LIMIAR_CHEIO_RESET < 10#$LIMIAR_CHEIO )) || erro 'LIMIAR_CHEIO_RESET precisa ser menor que LIMIAR_CHEIO'
 [[ "$DRY" == 0 || "$DRY" == 1 ]] || erro 'DRY deve ser 0 ou 1'
+[[ "$LOG_MAX_BYTES" =~ ^[0-9]{1,9}$ ]] &&
+  (( 10#$LOG_MAX_BYTES >= 1024 && 10#$LOG_MAX_BYTES <= 104857600 )) ||
+  erro 'BATWATCH_LOG_MAX_BYTES deve estar entre 1024 e 104857600'
 [[ "$DESTINO" =~ ^[0-9]{10,15}$ ]] || erro 'DESTINO deve ter entre 10 e 15 digitos, sem +'
 # Valida a URL completa antes de preparar qualquer credencial.
 # HTTP e permitido somente em testes locais, quando autorizado explicitamente.
@@ -157,6 +190,7 @@ EVO_INSTANCE_SEGMENT="$(jq -rn --arg valor "$EVO_INSTANCE" '$valor | @uri')" ||
 if [[ "$DRY" == 1 ]]; then
   STATE="${STATE}.dry"  # testes nunca alteram os alertas de producao
   LOCK="${LOCK}.dry"    # testes nao bloqueiam a instancia de producao
+  LOG="${LOG}.dry"      # testes nao misturam registros com producao
 fi
 touch "$LOG" "$STATE" "$LOCK" || erro 'nao foi possivel criar arquivos locais'
 chmod 600 "$LOG" "$STATE" "$LOCK" 2>/dev/null || true
