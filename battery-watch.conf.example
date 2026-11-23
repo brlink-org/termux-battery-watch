@@ -1,0 +1,13 @@
+# Copie para ~/.battery-watch.conf e edite SOMENTE no aparelho.
+# Nunca publique este arquivo preenchido.
+EVO_URL="https://sua-evolution.exemplo.com"
+EVO_TOKEN="INSIRA_SUA_CHAVE_API"
+EVO_INSTANCE="nome_da_instancia"
+DESTINO="5571999999999"  # codigo do pais + DDD + telefone, sem +
+
+INTERVALO=60
+LIMIAR_BAIXO=30
+LIMIAR_RESET=33
+LIMIAR_CHEIO=100
+LIMIAR_CHEIO_RESET=98
+# DRY=1   # somente testes, sem envio real

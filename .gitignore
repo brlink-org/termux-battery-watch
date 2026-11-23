@@ -1,0 +1,15 @@
+# Credenciais, estados e logs locais (nunca versionar)
+battery-watch.conf
+.battery-watch.conf
+*.curlrc
+*.state
+*.state.dry
+*.log
+*.lock
+*.lock.dry
+
+# Temporarios de editor e sistema
+*.swp
+*.swo
+*~
+.DS_Store
