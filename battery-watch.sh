@@ -143,6 +143,17 @@ command -v flock >/dev/null 2>&1 || erro 'instale flock: pkg install util-linux'
 command -v timeout >/dev/null 2>&1 || erro 'instale timeout: pkg install coreutils'
 EVO_URL="${EVO_URL%/}"
 
+# O nome e um segmento da rota; caracteres especiais devem ser codificados.
+# Nao impor uma lista ASCII: a API pode aceitar nomes com espacos ou Unicode.
+(( ${#EVO_INSTANCE} <= 255 )) || erro 'EVO_INSTANCE excede 255 caracteres'
+case "$EVO_INSTANCE" in
+  */*|*\?*|*#*|*%*)
+    erro 'EVO_INSTANCE contem caractere que altera o caminho da URL' ;;
+esac
+[[ ! "$EVO_INSTANCE" =~ [[:cntrl:]] ]] || erro 'EVO_INSTANCE contem caractere de controle'
+EVO_INSTANCE_SEGMENT="$(jq -rn --arg valor "$EVO_INSTANCE" '$valor | @uri')" ||
+  erro 'nao foi possivel codificar EVO_INSTANCE'
+
 if [[ "$DRY" == 1 ]]; then
   STATE="${STATE}.dry"  # testes nunca alteram os alertas de producao
   LOCK="${LOCK}.dry"    # testes nao bloqueiam a instancia de producao
@@ -186,7 +197,7 @@ envia() {
   # Nao seguir redirecionamentos nem permitir outro protocolo de transporte.
   http="$(curl -q --proto "=$EVO_PROTO" --proto-redir "=$EVO_PROTO" \
     --max-redirs 0 -sS --connect-timeout 8 --max-time 25 -K "$CURLRC" \
-    -X POST "$EVO_URL/message/sendText/$EVO_INSTANCE" \
+    -X POST "$EVO_URL/message/sendText/$EVO_INSTANCE_SEGMENT" \
     --data-binary "$payload" -o /dev/null -w '%{http_code}')"
   rc=$?
   if [[ "$rc" -eq 0 && "$http" =~ ^2[0-9][0-9]$ ]]; then

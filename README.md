@@ -106,7 +106,7 @@ LIMIAR_CHEIO_RESET=98
 
 - `EVO_URL`: URL base da Evolution API. **HTTPS obrigatório** para servidores externos. HTTP só é aceito em loopback (`127.0.0.1`, `localhost` ou `[::1]`), com `BATWATCH_ALLOW_HTTP_LOOPBACK=1` para testes locais.
 - `EVO_TOKEN`: chave de API autorizada para envio de mensagens (`apikey`).
-- `EVO_INSTANCE`: nome da instância conectada.
+- `EVO_INSTANCE`: nome da instância conectada. Nomes com espaços e Unicode são codificados com segurança na URL; separadores de caminho (`/`, `?`, `#`, `%`) e caracteres de controle são rejeitados antes do envio.
 - `DESTINO`: número internacional apenas com dígitos, por exemplo `55` + DDD + número do celular.
 - `INTERVALO`: intervalo entre leituras em segundos.
 - Limiares: percentuais configuráveis e seus pontos de rearme (**histerese**).
