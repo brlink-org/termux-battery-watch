@@ -233,11 +233,11 @@ Verifique se `DRY=1` não está ativo, se os dados da API estão corretos, se a 
 tail -n 50 ~/.battery-watch.log
 ```
 
-O monitor **não envia uma mensagem apenas porque foi iniciado**, exceto aviso de bateria baixa. Se o envio falhar, ele tenta novamente na próxima leitura, enquanto a condição persistir.
+O monitor **não envia uma mensagem apenas porque foi iniciado**, exceto aviso de bateria baixa. Se o envio falhar, aplica uma espera controlada antes de tentar novamente, de acordo com o tipo de erro, enquanto a condição persistir. Um tempo limite pode deixar o resultado incerto, pois a API pode ter processado a mensagem sem responder.
 
 ### Alterei o token da Evolution API
 
-Reinicie o monitor. A versão atual regrava `~/.battery-watch.curlrc` com o token configurado a cada inicialização em produção.
+Reinicie o monitor. A versão atual regrava `~/.battery-watch.curlrc` com o token configurado a cada inicialização em produção e elimina o período de espera anterior caso a chave tenha mudado.
 
 ### Quero redefinir os alertas
 

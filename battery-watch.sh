@@ -170,25 +170,87 @@ fi
 
 # Atualiza o header a cada execucao; nunca reutiliza um token antigo.
 # Credenciais nao aparecem nos argumentos do curl nem no historico.
+TOKEN_ALTERADO=0
 if [[ "$DRY" == 0 ]]; then
   [[ "$EVO_TOKEN" != *$'\n'* && "$EVO_TOKEN" != *$'\r'* && "$EVO_TOKEN" != *'"'* && "$EVO_TOKEN" != *'\'* ]] || erro 'EVO_TOKEN contem caracteres invalidos para o arquivo curl'
+  # Compara dentro do shell, sem colocar a chave na lista de argumentos.
+  if [[ ! -f "$CURLRC" ]] ||
+     ! cmp -s "$CURLRC" <(printf 'header = "apikey: %s"\nheader = "Content-Type: application/json"\n' "$EVO_TOKEN"); then
+    TOKEN_ALTERADO=1
+  fi
   printf 'header = "apikey: %s"\nheader = "Content-Type: application/json"\n' "$EVO_TOKEN" > "$CURLRC" || erro 'falha ao gravar credenciais do curl'
   chmod 600 "$CURLRC" 2>/dev/null || true
 fi
 
 ler() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1; }
 grava() {
-  local k="$1" v="$2"
-  if grep -q "^$k=" "$STATE" 2>/dev/null; then
-    sed -i "s|^$k=.*|$k=$v|" "$STATE"
-  else
-    printf '%s=%s\n' "$k" "$v" >> "$STATE"
-  fi
+  local k="$1" v="$2" tmp linha nome
+  local -A campos=()
+  tmp="$(mktemp "${STATE}.XXXXXX")" || return 1
+  # Mantem a ultima ocorrencia valida de cada chave, descartando linhas ruins.
+  while IFS= read -r linha || [[ -n "$linha" ]]; do
+    [[ "$linha" =~ ^([A-Za-z_][A-Za-z_0-9]*)=(.*)$ ]] || continue
+    nome="${BASH_REMATCH[1]}"
+    campos["$nome"]="${BASH_REMATCH[2]}"
+  done < "$STATE"
+  campos["$k"]="$v"
+  for nome in "${!campos[@]}"; do
+    printf '%s=%s\n' "$nome" "${campos[$nome]}" >> "$tmp" ||
+      { rm -f "$tmp"; return 1; }
+  done
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$STATE"
 }
+
+limpar_tentativas() {
+  local evento="$1" k v
+  for k in "proxima_${evento}" "falhas_${evento}"; do
+    v="$(ler "$k")"
+    [[ -z "$v" || "$v" == 0 ]] || grava "$k" 0
+  done
+}
+
+pode_tentar() {
+  local evento="$1" proxima
+  proxima="$(ler "proxima_${evento}")"
+  [[ "$proxima" =~ ^[0-9]{1,12}$ ]] || return 0
+  (( $(date +%s) >= 10#$proxima ))
+}
+
+registrar_erro_envio() {
+  local evento="$1" rc="$2" http="$3" falhas atraso
+  falhas="$(ler "falhas_${evento}")"
+  [[ "$falhas" =~ ^[0-9]{1,3}$ ]] || falhas=0
+  falhas=$(( 10#$falhas + 1 ))
+  (( falhas > 20 )) && falhas=20
+  # Requisicao com resposta perdida e incerta: espacamento maior.
+  if [[ "$rc" == 28 ]]; then
+    atraso=900
+  else
+    case "$http" in
+      401|403) atraso=3600 ;;
+      429) atraso=900 ;;
+      5??|000|'')
+        atraso=$(( 60 * (2 ** (falhas < 4 ? falhas - 1 : 3)) ))
+        (( atraso > 300 )) && atraso=300 ;;
+      *) atraso=120 ;;
+    esac
+  fi
+  grava "falhas_${evento}" "$falhas"
+  grava "proxima_${evento}" "$(( $(date +%s) + atraso ))"
+  log "ERRO evento=$evento curl=$rc http=${http:-sem-resposta} tentativa=$falhas espera=${atraso}s"
+  [[ "$rc" == 28 ]] && log "AVISO evento=$evento resultado incerto; a API pode ter recebido a mensagem"
+}
+
+# A troca de chave invalida a espera por autenticacao, sem persistir hash de token.
+if [[ "$TOKEN_ALTERADO" == 1 ]]; then
+  for evento in baixo plugado cheio; do limpar_tentativas "$evento"; done
+fi
+
 envia() {
-  local msg="$1" payload http rc
+  local evento="$1" msg="$2" payload http rc
   if [[ "$DRY" == 1 ]]; then
-    log "DRY msg=$msg"
+    log "DRY evento=$evento msg=$msg"
     printf '[DRY] %s\n' "$msg"
     return 0
   fi
@@ -201,10 +263,11 @@ envia() {
     --data-binary "$payload" -o /dev/null -w '%{http_code}')"
   rc=$?
   if [[ "$rc" -eq 0 && "$http" =~ ^2[0-9][0-9]$ ]]; then
-    log "OK http=$http msg=$msg"
+    log "OK evento=$evento http=$http msg=$msg"
+    limpar_tentativas "$evento"
     return 0
   fi
-  log "ERRO curl=$rc http=${http:-sem-resposta} msg=$msg"
+  registrar_erro_envio "$evento" "$rc" "$http"
   return 1
 }
 
@@ -271,21 +334,30 @@ while :; do
     else
       aviso="🔋 Bateria baixa: ${CAP}%. Nao foi possivel confirmar a alimentacao."
     fi
-    if envia "$aviso"; then grava baixo_avisado 1; fi
+    if pode_tentar baixo && envia baixo "$aviso"; then grava baixo_avisado 1; fi
   fi
-  if (( 10#$CAP > 10#$LIMIAR_RESET )); then grava baixo_avisado 0; fi
+  if (( 10#$CAP > 10#$LIMIAR_RESET )); then
+    grava baixo_avisado 0
+    limpar_tentativas baixo
+  fi
 
   if [[ "$PLUGADO" == 1 && "$CONEXAO_CONFIRMADA" == 1 ]] &&
      (( 10#$CAP < 10#$LIMIAR_CHEIO )) && [[ "$(ler plugado_avisado)" != 1 ]]; then
-    if envia "🔌 Carregador conectado — bateria em ${CAP}%."; then grava plugado_avisado 1; fi
+    if pode_tentar plugado && envia plugado "🔌 Carregador conectado — bateria em ${CAP}%."; then grava plugado_avisado 1; fi
   fi
   # Nunca considerar fonte indeterminada como uma desconexao comprovada.
-  [[ "$PLUGADO" == 0 && "$CONEXAO_CONFIRMADA" == 1 ]] && grava plugado_avisado 0
+  if [[ "$PLUGADO" == 0 && "$CONEXAO_CONFIRMADA" == 1 ]]; then
+    grava plugado_avisado 0
+    limpar_tentativas plugado
+  fi
 
   if (( 10#$CAP >= 10#$LIMIAR_CHEIO )) && [[ "$(ler cheio_avisado)" != 1 ]]; then
-    if envia "✅ Bateria em ${CAP}% — carga completa, pode desconectar."; then grava cheio_avisado 1; fi
+    if pode_tentar cheio && envia cheio "✅ Bateria em ${CAP}% — carga completa, pode desconectar."; then grava cheio_avisado 1; fi
   fi
-  if (( 10#$CAP < 10#$LIMIAR_CHEIO_RESET )); then grava cheio_avisado 0; fi
+  if (( 10#$CAP < 10#$LIMIAR_CHEIO_RESET )); then
+    grava cheio_avisado 0
+    limpar_tentativas cheio
+  fi
 
   grava ultimo "$CAP"
   sleep "$INTERVALO"
