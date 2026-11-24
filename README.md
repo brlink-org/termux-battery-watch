@@ -9,10 +9,12 @@ Funciona **sem root** e **sem cron**. Usa preferencialmente o aplicativo **Termu
 | Evento | Condição inicial padrão | Comportamento |
 | --- | --- | --- |
 | Bateria baixa | **30% ou menos**, desconectado ou sem alimentação confirmada | Avisa uma vez; rearma acima de **33%** |
-| Carregador conectado | Transição para fonte de energia conectada, antes de 100% | Avisa uma vez por conexão |
+| Carregador conectado | Transição para fonte de energia conectada, antes de 100% | Avisa uma vez por conexão detectada; se inferida pelo kernel, usa texto específico |
 | Carga completa | **100%** | Avisa uma vez; rearma abaixo de **98%** |
 
 A verificação ocorre a cada **60 segundos** (configurável). Ao iniciar o monitor com o carregador já conectado ou a carga já completa, esses dois avisos de transição são silenciados. **Bateria baixa** pode gerar aviso imediatamente, incluindo quando a origem da alimentação é desconhecida (mensagem neutra). Um estado `NOT_CHARGING` não significa automaticamente que o cabo esteja desconectado.
+
+Na leitura alternativa pelo kernel, uma fonte legível com `online=1` indica alimentação externa; quando todas as fontes `online` visíveis estão legíveis e em zero (sem contradição de carregamento), o monitor considera a alimentação desconectada. Sem dados conclusivos de `online`, `CHARGING` e `DISCHARGING` permitem inferir transições, mas não provar a conexão física. O aviso de carregamento inferido tem texto próprio; `FULL` e `NOT_CHARGING` isolados não rearmam o aviso. Leituras inferidas podem divergir da conexão física, sobretudo ao alternar entre Termux:API e kernel.
 
 > **Importante:** o projeto depende de uma Evolution API acessível e de uma instância WhatsApp conectada. O sucesso HTTP confirma que a requisição foi aceita pela API, **não** comprova a entrega ao destinatário.
 
@@ -107,10 +109,40 @@ LIMIAR_CHEIO_RESET=98
 - `EVO_URL`: URL base da Evolution API. **HTTPS obrigatório** para servidores externos. HTTP só é aceito em loopback (`127.0.0.1`, `localhost` ou `[::1]`), com `BATWATCH_ALLOW_HTTP_LOOPBACK=1` para testes locais.
 - `EVO_TOKEN`: chave de API autorizada para envio de mensagens (`apikey`).
 - `EVO_INSTANCE`: nome da instância conectada. Nomes com espaços e Unicode são codificados com segurança na URL; separadores de caminho (`/`, `?`, `#`, `%`) e caracteres de controle são rejeitados antes do envio.
-- `DESTINO`: número internacional apenas com dígitos, por exemplo `55` + DDD + número do celular.
+- `DESTINO`: número internacional com 10 a 15 dígitos, sem `+`, **ou identificador de grupo do WhatsApp** terminado em `@g.us`. São aceitos os formatos antigo (`numero-timestamp@g.us`) e moderno (`id@g.us`).
 - `INTERVALO`: intervalo entre leituras em segundos.
 - `BATWATCH_LOG_MAX_BYTES`: tamanho máximo de cada log em bytes (padrão 1048576 = 1 MB); são mantidos dois históricos por modo.
 - Limiares: percentuais configuráveis e seus pontos de rearme (**histerese**).
+
+#### Enviar para um grupo do WhatsApp
+
+Em vez do número particular, configure o identificador do grupo. Exemplos fictícios:
+
+```bash
+# Formato antigo:
+DESTINO='5511999999999-1571774628@g.us'
+# Ou formato moderno:
+# DESTINO='120363000000000000@g.us'
+```
+
+Use o identificador real fornecido pela Evolution API para o grupo em que a instância participa. A validação é sintática; não comprova que o grupo existe ou que a instância tem permissão para enviar. A requisição usa o mesmo campo JSON `number` em ambos os casos. Alterar o destino não reinicia automaticamente o estado persistente dos alertas.
+
+#### Personalizar as mensagens
+
+Acrescente ao arquivo privado `~/.battery-watch.conf` somente os modelos que deseja alterar. Os seis modelos são opcionais; sem configuração, mantêm-se os textos padrão (incluindo os cinco alertas já existentes e o aviso novo para fonte inferida).
+
+```bash
+MSG_BAIXA_DESCONECTADO='🔋 Meu aparelho: bateria em {percentual}%. Conecte o carregador.'
+MSG_BAIXA_CONECTADO='🔋 Bateria baixa: {percentual}% apesar da fonte conectada. Verifique o carregamento.'
+MSG_BAIXA_DESCONHECIDO='🔋 Bateria baixa: {percentual}%. Nao foi possivel confirmar a alimentacao.'
+MSG_CARREGADOR_CONECTADO='🔌 Carregador conectado — bateria em {percentual}%.'
+MSG_CARGA_COMPLETA='✅ Bateria em {percentual}% — carga completa, pode desconectar.'
+MSG_CARREGADOR_INFERIDO='🔌 Carregamento detectado — bateria em {percentual}% (fonte inferida).'
+```
+
+O marcador literal `{percentual}` é substituído pelo percentual da leitura, inclusive quando repetido. Use aspas simples para preservar `$`, `%`, asteriscos, emojis e quebras de linha; o renderizador não executa o texto como código. Variáveis vazias usam o texto padrão. O arquivo de configuração em si é interpretado como Bash e deve ser confiável. Os textos aparecem no log; não inclua tokens ou informações privadas nas mensagens.
+
+Reinicie o monitor após editar a configuração. Teste primeiro com `DRY=1`; nenhum envio real é feito nesse modo. O arquivo de exemplo contém os seis modelos comentados.
 
 Proteja a configuração:
 
@@ -164,7 +196,7 @@ Para manter em segundo plano:
 nohup "$HOME/bin/battery-watch.sh" >/dev/null 2>&1 &
 ```
 
-O monitor escreve seus próprios eventos em `~/.battery-watch.log` e faz rotação interna. O redirecionamento do `nohup` vai para `/dev/null` para não manter um descritor aberto no log renomeado. **Antes de usar em segundo plano**, execute uma vez em primeiro plano para confirmar que não há erros de configuração; os erros iniciais aparecem no terminal.
+O monitor escreve seus próprios eventos em `~/.battery-watch.log` e faz rotação interna. Cada envio aceito possui registro próprio, mesmo que a mensagem seja igual a outra; apenas falhas repetitivas de leitura são resumidas e sua recuperação é registrada. Erros de transporte do `curl` recebem uma categoria de diagnóstico (DNS, conexão, certificado/TLS, tempo limite etc.), sem copiar a saída bruta que pode conter dados privados. O estado é substituído atomicamente apenas quando algum valor muda ou precisa ser normalizado. O redirecionamento do `nohup` vai para `/dev/null` para não manter um descritor aberto no log renomeado. **Antes de usar em segundo plano**, execute uma vez em primeiro plano para confirmar que não há erros de configuração; os erros iniciais aparecem no terminal.
 
 O script solicita `termux-wake-lock`, faz a leitura periodicamente e usa `flock` para impedir duas instâncias simultâneas. **Não é necessário executar `termux-wake-lock` separadamente** para esse monitor.
 
@@ -263,6 +295,16 @@ Em seguida, inicie o monitor novamente.
 - Mensagens aceitas por HTTP **2xx** não representam garantia de entrega pelo WhatsApp.
 - O monitor depende de bateria, conectividade, disponibilidade da API e políticas de execução em segundo plano do Android.
 - O projeto **não é** um sistema de segurança ou alerta crítico com alta disponibilidade.
+
+## Testes automatizados (desenvolvimento)
+
+Em um checkout do repositório, em Linux com Bash, Git, curl, jq, coreutils, util-linux e **Python 3.9+** (dependência somente dos testes), execute:
+
+```bash
+bash tests/test_regressao.sh
+```
+
+A suíte usa configurações, estado, logs e leituras de bateria isolados em diretórios temporários. A raiz alternativa do kernel é apontada para as amostras por `BATWATCH_SYSFS_ROOT`, nunca para o hardware real; não configure essa variável no uso normal. O `curl` é simulado, exceto em um teste HTTP controlado em `127.0.0.1` com credenciais fictícias. Não há envio ao WhatsApp. Cada caso verifica saídas e efeitos observáveis; falhas produzem código de saída diferente de zero. Para executar um único teste, passe seu nome ao comando (por exemplo `Regressao.test_grupo_dry`). O funcionamento no Android e a entrega por uma instância Evolution real devem ser validados separadamente.
 
 ## Referências
 

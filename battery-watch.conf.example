@@ -11,3 +11,15 @@ LIMIAR_RESET=33
 LIMIAR_CHEIO=100
 LIMIAR_CHEIO_RESET=98
 # DRY=1   # somente testes, sem envio real
+
+# Destino de grupo (alternativa ao número acima):
+# DESTINO='5511999999999-1571774628@g.us'
+# DESTINO='120363000000000000@g.us'
+
+# Mensagens opcionais: use aspas simples e o marcador literal {percentual}.
+# MSG_BAIXA_DESCONECTADO='🔋 Bateria baixa: {percentual}% (descarregando). Coloque para carregar.'
+# MSG_BAIXA_CONECTADO='🔋 Bateria baixa: {percentual}% apesar da fonte conectada. Verifique o carregamento.'
+# MSG_BAIXA_DESCONHECIDO='🔋 Bateria baixa: {percentual}%. Nao foi possivel confirmar a alimentacao.'
+# MSG_CARREGADOR_CONECTADO='🔌 Carregador conectado — bateria em {percentual}%.'
+# MSG_CARGA_COMPLETA='✅ Bateria em {percentual}% — carga completa, pode desconectar.'
+# MSG_CARREGADOR_INFERIDO='🔌 Carregamento detectado — bateria em {percentual}% (fonte inferida).'

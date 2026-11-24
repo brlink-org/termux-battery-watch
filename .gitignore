@@ -4,7 +4,9 @@ battery-watch.conf
 *.curlrc
 *.state
 *.state.dry
+*.state.*
 *.log
+*.log.*
 *.lock
 *.lock.dry
 

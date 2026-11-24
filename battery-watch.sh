@@ -26,6 +26,19 @@ LIMIAR_BAIXO="${LIMIAR_BAIXO:-30}"
 LIMIAR_RESET="${LIMIAR_RESET:-33}"
 LIMIAR_CHEIO="${LIMIAR_CHEIO:-100}"
 LIMIAR_CHEIO_RESET="${LIMIAR_CHEIO_RESET:-98}"
+# Modelos opcionais: o marcador {percentual} é literal no arquivo de configuração.
+[[ -n "${MSG_BAIXA_DESCONECTADO:-}" ]] || MSG_BAIXA_DESCONECTADO='🔋 Bateria baixa: {percentual}% (descarregando). Coloque para carregar.'
+[[ -n "${MSG_BAIXA_CONECTADO:-}" ]] || MSG_BAIXA_CONECTADO='🔋 Bateria baixa: {percentual}% apesar da fonte conectada. Verifique o carregamento.'
+[[ -n "${MSG_BAIXA_DESCONHECIDO:-}" ]] || MSG_BAIXA_DESCONHECIDO='🔋 Bateria baixa: {percentual}%. Nao foi possivel confirmar a alimentacao.'
+[[ -n "${MSG_CARREGADOR_CONECTADO:-}" ]] || MSG_CARREGADOR_CONECTADO='🔌 Carregador conectado — bateria em {percentual}%.'
+[[ -n "${MSG_CARGA_COMPLETA:-}" ]] || MSG_CARGA_COMPLETA='✅ Bateria em {percentual}% — carga completa, pode desconectar.'
+[[ -n "${MSG_CARREGADOR_INFERIDO:-}" ]] || MSG_CARREGADOR_INFERIDO='🔌 Carregamento detectado — bateria em {percentual}% (fonte inferida).'
+
+renderizar_mensagem() {
+  local modelo="$1" percentual="$2"
+  # Atribuição direta preserva inclusive quebras de linha finais; sem eval.
+  aviso="${modelo//\{percentual\}/$percentual}"
+}
 STATE="${BATWATCH_STATE:-$HOME/.battery-watch.state}"
 LOG="${BATWATCH_LOG:-$HOME/.battery-watch.log}"
 CURLRC="${BATWATCH_CURLRC:-$HOME/.battery-watch.curlrc}"
@@ -46,8 +59,15 @@ escrever_log() {
 }
 
 log() {
-  local msg="$*"
-  if [[ "$msg" == "$ULTIMO_LOG" ]]; then
+  local msg="$*" repetivel=0
+  # Só falhas repetitivas de leitura podem ser agrupadas; cada envio tem sua linha.
+  case "$msg" in
+    'leitura da bateria indisponivel;'*|'leitura invalida '*) repetivel=1 ;;
+  esac
+  # Mensagem configurável pode ser multilinha; não forjar registros no log.
+  msg="${msg//$'\r'/\\r}"
+  msg="${msg//$'\n'/\\n}"
+  if [[ "$repetivel" == 1 && "$msg" == "$ULTIMO_LOG" ]]; then
     LOG_REPETICOES=$(( LOG_REPETICOES + 1 ))
     # Registra periodicamente a repeticao, sem poluir a cada ciclo.
     if (( LOG_REPETICOES % 60 == 0 )); then
@@ -58,7 +78,8 @@ log() {
   if (( LOG_REPETICOES > 0 )); then
     escrever_log "RESUMO: $ULTIMO_LOG repetido $LOG_REPETICOES vezes adicionais"
   fi
-  ULTIMO_LOG="$msg"
+  ULTIMO_LOG=''
+  [[ "$repetivel" == 0 ]] || ULTIMO_LOG="$msg"
   LOG_REPETICOES=0
   escrever_log "$msg"
 }
@@ -68,6 +89,7 @@ erro() { printf 'ERRO: %s\n' "$*" >&2; exit 2; }
 # Exemplo: 42 CHARGING PLUGGED_AC
 bateria() {
   local j dados d tipo cap status plug p fonte online origem
+  local lidas=0 incompletas=0 raiz="${BATWATCH_SYSFS_ROOT:-/sys/class/power_supply}"
   if command -v termux-battery-status >/dev/null 2>&1 && \
      command -v timeout >/dev/null 2>&1 && \
      command -v jq >/dev/null 2>&1; then
@@ -85,7 +107,7 @@ bateria() {
 
   # Em alguns Androids /sys e inacessivel. Nunca escolher uma fonte
   # que nao seja do tipo Battery (ex.: USB, wireless, AC).
-  for d in /sys/class/power_supply/battery /sys/class/power_supply/BAT0 /sys/class/power_supply/*; do
+  for d in "$raiz"/battery "$raiz"/BAT0 "$raiz"/*; do
     [[ -r "$d/type" && -r "$d/capacity" && -r "$d/status" ]] || continue
     tipo="$(cat "$d/type" 2>/dev/null)" || continue
     [[ "${tipo,,}" == battery ]] || continue
@@ -93,24 +115,36 @@ bateria() {
     status="$(cat "$d/status" 2>/dev/null)" || continue
     status="${status^^}"
     status="${status// /_}"
-    # A leitura do status apenas sugere a fonte; nao confirma o cabo.
+    # Diferencia evidência explícita de alimentação e inferência pelo estado.
     plug="UNKNOWN"
     origem="SYSFS_INFERIDO"
-    case "$status" in
-      CHARGING|FULL) plug="PLUGGED_OTHER" ;;
-      DISCHARGING) plug="UNPLUGGED" ;;
-    esac
-    for p in /sys/class/power_supply/*/online; do
-      [[ -r "$p" && -r "${p%/online}/type" ]] || continue
-      fonte="$(cat "${p%/online}/type" 2>/dev/null)" || continue
-      [[ "${fonte,,}" == battery ]] && continue
-      online="$(cat "$p" 2>/dev/null)" || continue
-      if [[ "$online" == 1 ]]; then
-        plug="PLUGGED_OTHER"
-        origem="SYSFS_ONLINE"
-        break
+    for p in "$raiz"/*/online; do
+      [[ -e "$p" ]] || continue
+      if ! fonte="$(cat "${p%/online}/type" 2>/dev/null)"; then
+        incompletas=1; continue
       fi
+      [[ "${fonte,,}" == battery ]] && continue
+      if ! online="$(cat "$p" 2>/dev/null)"; then
+        incompletas=1; continue
+      fi
+      case "$online" in
+        1) plug="PLUGGED_OTHER"; origem="SYSFS_ONLINE"; break ;;
+        0) lidas=$((lidas + 1)) ;;
+        *) incompletas=1 ;;
+      esac
     done
+    if [[ "$origem" != SYSFS_ONLINE ]]; then
+      if (( lidas > 0 && incompletas == 0 )) && [[ "$status" != CHARGING ]]; then
+        plug="UNPLUGGED"; origem="SYSFS_OFFLINE"
+      else
+        # Sem confirmação pelo kernel, só CHARGING/DISCHARGING sugerem transição.
+        # FULL e NOT_CHARGING não provam conexão nem desconexão física.
+        case "$status" in
+          CHARGING) plug="PLUGGED_OTHER" ;;
+          DISCHARGING) plug="UNPLUGGED" ;;
+        esac
+      fi
+    fi
     printf '%s %s %s %s\n' "$cap" "$status" "$plug" "$origem"
     return 0
   done
@@ -141,7 +175,10 @@ done
 [[ "$LOG_MAX_BYTES" =~ ^[0-9]{1,9}$ ]] &&
   (( 10#$LOG_MAX_BYTES >= 1024 && 10#$LOG_MAX_BYTES <= 104857600 )) ||
   erro 'BATWATCH_LOG_MAX_BYTES deve estar entre 1024 e 104857600'
-[[ "$DESTINO" =~ ^[0-9]{10,15}$ ]] || erro 'DESTINO deve ter entre 10 e 15 digitos, sem +'
+# A Evolution usa o campo number tanto para contatos quanto para grupos.
+if [[ ! "$DESTINO" =~ ^[0-9]{10,15}$ && ! "$DESTINO" =~ ^[0-9]+(-[0-9]+)?@g[.]us$ ]]; then
+  erro 'DESTINO invalido: use numero internacional sem + ou identificador de grupo @g.us'
+fi
 # Valida a URL completa antes de preparar qualquer credencial.
 # HTTP e permitido somente em testes locais, quando autorizado explicitamente.
 validar_url() {
@@ -218,22 +255,29 @@ fi
 
 ler() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1; }
 grava() {
-  local k="$1" v="$2" tmp linha nome
+  local k="$1" v="$2" tmp linha nome alterado=0
   local -A campos=()
-  tmp="$(mktemp "${STATE}.XXXXXX")" || return 1
   # Mantem a ultima ocorrencia valida de cada chave, descartando linhas ruins.
   while IFS= read -r linha || [[ -n "$linha" ]]; do
-    [[ "$linha" =~ ^([A-Za-z_][A-Za-z_0-9]*)=(.*)$ ]] || continue
+    if [[ ! "$linha" =~ ^([A-Za-z_][A-Za-z_0-9]*)=(.*)$ ]]; then
+      alterado=1; continue
+    fi
     nome="${BASH_REMATCH[1]}"
+    [[ ! ${campos[$nome]+existe} ]] || alterado=1
     campos["$nome"]="${BASH_REMATCH[2]}"
-  done < "$STATE"
+  done < "$STATE" || erro 'falha ao ler estado'
+  # Mesmo valor não requer escrita, exceto se houver dados a normalizar.
+  if [[ "$alterado" == 0 && ${campos[$k]+existe} && "${campos[$k]}" == "$v" ]]; then
+    return 0
+  fi
   campos["$k"]="$v"
+  tmp="$(mktemp "${STATE}.XXXXXX")" || erro 'falha ao criar estado temporário'
   for nome in "${!campos[@]}"; do
     printf '%s=%s\n' "$nome" "${campos[$nome]}" >> "$tmp" ||
-      { rm -f "$tmp"; return 1; }
+      { rm -f "$tmp"; erro 'falha ao escrever estado'; }
   done
-  chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE"
+  chmod 600 "$tmp" && mv -f "$tmp" "$STATE" ||
+    { rm -f "$tmp"; erro 'falha ao persistir estado'; }
 }
 
 limpar_tentativas() {
@@ -252,7 +296,7 @@ pode_tentar() {
 }
 
 registrar_erro_envio() {
-  local evento="$1" rc="$2" http="$3" falhas atraso
+  local evento="$1" rc="$2" http="$3" falhas atraso motivo
   falhas="$(ler "falhas_${evento}")"
   [[ "$falhas" =~ ^[0-9]{1,3}$ ]] || falhas=0
   falhas=$(( 10#$falhas + 1 ))
@@ -272,7 +316,19 @@ registrar_erro_envio() {
   fi
   grava "falhas_${evento}" "$falhas"
   grava "proxima_${evento}" "$(( $(date +%s) + atraso ))"
-  log "ERRO evento=$evento curl=$rc http=${http:-sem-resposta} tentativa=$falhas espera=${atraso}s"
+  # Diagnóstico por código: não misturar stderr no HTTP nem registrar dados privados.
+  case "$rc" in
+    0) motivo='resposta HTTP sem sucesso' ;;
+    3) motivo='URL inválida' ;;
+    5) motivo='falha de resolução do proxy' ;;
+    6) motivo='falha de resolução DNS' ;;
+    7) motivo='falha ao estabelecer conexão' ;;
+    28) motivo='tempo limite excedido' ;;
+    35|51|60|77|83|90|91) motivo='falha de TLS ou certificado' ;;
+    52|55|56) motivo='falha de comunicação com o servidor' ;;
+    *) motivo='falha de transporte (consulte o código curl)' ;;
+  esac
+  log "ERRO evento=$evento curl=$rc http=${http:-sem-resposta} motivo=$motivo tentativa=$falhas espera=${atraso}s"
   [[ "$rc" == 28 ]] && log "AVISO evento=$evento resultado incerto; a API pode ter recebido a mensagem"
 }
 
@@ -294,7 +350,7 @@ envia() {
   http="$(curl -q --proto "=$EVO_PROTO" --proto-redir "=$EVO_PROTO" \
     --max-redirs 0 -sS --connect-timeout 8 --max-time 25 -K "$CURLRC" \
     -X POST "$EVO_URL/message/sendText/$EVO_INSTANCE_SEGMENT" \
-    --data-binary "$payload" -o /dev/null -w '%{http_code}')"
+    --data-binary "$payload" -o /dev/null -w '%{http_code}' 2>/dev/null)"
   rc=$?
   if [[ "$rc" -eq 0 && "$http" =~ ^2[0-9][0-9]$ ]]; then
     log "OK evento=$evento http=$http msg=$msg"
@@ -326,6 +382,9 @@ while :; do
     continue
   fi
 
+  # Uma leitura válida encerra a sequência de falhas, mesmo sem envio.
+  if [[ -n "$ULTIMO_LOG" ]]; then log 'leitura da bateria recuperada'; fi
+
   # A fonte conectada/desconectada so e confirmada com dado explicito.
   # PLUGGED_-1 indica informacao desconhecida, jamais conexao confirmada.
   PLUGADO='desconhecido'
@@ -335,15 +394,16 @@ while :; do
       PLUGADO=1; CONEXAO_CONFIRMADA=1 ;;
     UNPLUGGED)
       PLUGADO=0
-      [[ "$ORIGEM" == API ]] && CONEXAO_CONFIRMADA=1 ;;
+      [[ "$ORIGEM" == API || "$ORIGEM" == SYSFS_OFFLINE ]] && CONEXAO_CONFIRMADA=1 ;;
     PLUGGED_OTHER)
       PLUGADO=1
       [[ "$ORIGEM" == SYSFS_ONLINE ]] && CONEXAO_CONFIRMADA=1 ;;
   esac
   if [[ "$PLUGADO" == desconhecido ]]; then
-    # Este estado e apenas inferido: nao rearma o aviso de conexao.
+    # Inferência da API não rearma o aviso de conexão.
     case "$STATUS" in
-      CHARGING|FULL) PLUGADO=1 ;;
+      CHARGING) PLUGADO=1 ;;
+      FULL) [[ "$ORIGEM" == API ]] && PLUGADO=1 ;;
       DISCHARGING) PLUGADO=0 ;;
     esac
   fi
@@ -362,11 +422,11 @@ while :; do
      [[ "$PLUGADO" != 1 || "$STATUS" == DISCHARGING ]] &&
      [[ "$(ler baixo_avisado)" != 1 ]]; then
     if [[ "$PLUGADO" == 1 ]]; then
-      aviso="🔋 Bateria baixa: ${CAP}% apesar da fonte conectada. Verifique o carregamento."
+      renderizar_mensagem "$MSG_BAIXA_CONECTADO" "$CAP"
     elif [[ "$PLUGADO" == 0 ]]; then
-      aviso="🔋 Bateria baixa: ${CAP}% (descarregando). Coloque para carregar."
+      renderizar_mensagem "$MSG_BAIXA_DESCONECTADO" "$CAP"
     else
-      aviso="🔋 Bateria baixa: ${CAP}%. Nao foi possivel confirmar a alimentacao."
+      renderizar_mensagem "$MSG_BAIXA_DESCONHECIDO" "$CAP"
     fi
     if pode_tentar baixo && envia baixo "$aviso"; then grava baixo_avisado 1; fi
   fi
@@ -375,18 +435,27 @@ while :; do
     limpar_tentativas baixo
   fi
 
-  if [[ "$PLUGADO" == 1 && "$CONEXAO_CONFIRMADA" == 1 ]] &&
+  # O caminho alternativo admite inferência coerente, mas não a apresenta como certeza.
+  if [[ "$PLUGADO" == 1 ]] &&
+     [[ "$CONEXAO_CONFIRMADA" == 1 || ( "$ORIGEM" == SYSFS_INFERIDO && "$STATUS" == CHARGING ) ]] &&
      (( 10#$CAP < 10#$LIMIAR_CHEIO )) && [[ "$(ler plugado_avisado)" != 1 ]]; then
-    if pode_tentar plugado && envia plugado "🔌 Carregador conectado — bateria em ${CAP}%."; then grava plugado_avisado 1; fi
+    if [[ "$CONEXAO_CONFIRMADA" == 1 ]]; then
+      renderizar_mensagem "$MSG_CARREGADOR_CONECTADO" "$CAP"
+    else
+      renderizar_mensagem "$MSG_CARREGADOR_INFERIDO" "$CAP"
+    fi
+    if pode_tentar plugado && envia plugado "$aviso"; then grava plugado_avisado 1; fi
   fi
-  # Nunca considerar fonte indeterminada como uma desconexao comprovada.
-  if [[ "$PLUGADO" == 0 && "$CONEXAO_CONFIRMADA" == 1 ]]; then
+  # Fonte indeterminada nunca rearma. No fallback, DISCHARGING é só uma inferência.
+  if [[ "$PLUGADO" == 0 ]] &&
+     [[ "$CONEXAO_CONFIRMADA" == 1 || ( "$ORIGEM" == SYSFS_INFERIDO && "$STATUS" == DISCHARGING ) ]]; then
     grava plugado_avisado 0
     limpar_tentativas plugado
   fi
 
   if (( 10#$CAP >= 10#$LIMIAR_CHEIO )) && [[ "$(ler cheio_avisado)" != 1 ]]; then
-    if pode_tentar cheio && envia cheio "✅ Bateria em ${CAP}% — carga completa, pode desconectar."; then grava cheio_avisado 1; fi
+    renderizar_mensagem "$MSG_CARGA_COMPLETA" "$CAP"
+    if pode_tentar cheio && envia cheio "$aviso"; then grava cheio_avisado 1; fi
   fi
   if (( 10#$CAP < 10#$LIMIAR_CHEIO_RESET )); then
     grava cheio_avisado 0
