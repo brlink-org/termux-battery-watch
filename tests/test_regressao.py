@@ -285,4 +285,89 @@ class Regressao(unittest.TestCase):
         self.assertEqual(len(p.stdout.splitlines()),9)
         p=subprocess.run(['git','-C',str(h),'check-ignore','battery-watch.sh','README.md','tests/test_regressao.py'],capture_output=True,text=True);self.assertEqual(p.returncode,1)
 
+    def test_critico_escalonamento(self):
+        self.m.run([leitura(n) for n in [31,30,20,16,15,14,0]])
+        self.assertEqual(len(self.m.calls()),2)
+        self.assertIn('Bateria baixa: 30%',self.m.calls()[0]['text'])
+        self.assertIn('Bateria crítica: 15%',self.m.calls()[1]['text'])
+        self.assertEqual(self.m.log().count('OK evento=critico'),1)
+        self.assertEqual(self.m.state()['critico_avisado'],'1')
+
+    def test_critico_inicio_prioridade_reinicio(self):
+        self.m.run([leitura(15),leitura(14),leitura(16)])
+        self.assertEqual(len(self.m.calls()),1)
+        self.assertIn('Bateria crítica: 15%',self.m.calls()[0]['text'])
+        self.assertEqual(self.m.state()['baixo_avisado'],'1')
+        self.m.run([leitura(15),leitura(14)])
+        self.assertEqual(len(self.m.calls()),1)
+
+    def test_critico_histerese_independente(self):
+        self.m.run([leitura(n) for n in [30,15,16,18,15,19,15,18,14]])
+        self.assertEqual(self.m.log().count('OK evento=baixo'),1)
+        self.assertEqual(self.m.log().count('OK evento=critico'),2)
+        self.assertEqual(len(self.m.calls()),3)
+
+    def test_critico_migracao_estado_anterior(self):
+        p=self.m.home/'.battery-watch.state'; p.write_text('inicializado=1\nbaixo_avisado=1\nultimo=16\n')
+        self.m.run([leitura(15)])
+        self.assertEqual(len(self.m.calls()),1)
+        self.assertIn('Bateria crítica: 15%',self.m.calls()[0]['text'])
+        self.assertEqual(self.m.state()['critico_avisado'],'1')
+
+    def test_critico_carregamento_ativo(self):
+        self.m.run([leitura(15,'CHARGING','PLUGGED_AC'),leitura(14,'CHARGING','PLUGGED_AC'),leitura(14)])
+        self.assertEqual(len(self.m.calls()),1)
+        self.assertIn('Bateria crítica: 14%',self.m.calls()[0]['text'])
+
+    def test_critico_fontes_e_estados(self):
+        cases=[leitura(15,'NOT_CHARGING','PLUGGED_AC'),leitura(15,'DISCHARGING','PLUGGED_AC'),leitura(15,'NOT_CHARGING','UNKNOWN'),leitura(15,'DISCHARGING','PLUGGED_-1'),leitura(15,'Not charging',sysfs=True,online=1),leitura(15,'Discharging',sysfs=True,online=0),leitura(0)]
+        for i,row in enumerate(cases):
+            with self.subTest(row=row):
+                h=self.m.home/f'critico{i}'; h.mkdir(); m=Monitor(h); m.run([row])
+                self.assertEqual(len(m.calls()),1); self.assertIn(f'Bateria crítica: {row["percentage"]}%',m.calls()[0]['text'])
+
+    def test_critico_falha_reinicio_troca_token(self):
+        rows=[leitura(15)]*3; self.m.run(rows,http='401')
+        self.assertEqual(len(self.m.calls()),1); self.assertNotEqual(self.m.state().get('critico_avisado'),'1')
+        self.assertEqual(self.m.state()['falhas_critico'],'1'); self.assertIn('espera=3600s',self.m.log())
+        self.m.run(rows,http='401'); self.assertEqual(len(self.m.calls()),1)
+        self.m.conf['EVO_TOKEN']='outra_chave_ficticia'; self.m.run(rows)
+        self.assertEqual(len(self.m.calls()),2); self.assertEqual(self.m.state()['critico_avisado'],'1')
+        self.assertEqual(self.m.state()['falhas_critico'],'0')
+
+    def test_critico_backoff_independente_e_rearme(self):
+        self.m.run([leitura(30)],http='500'); self.assertEqual(len(self.m.calls()),1)
+        self.m.run([leitura(15)]*2,http='500'); self.assertEqual(len(self.m.calls()),2)
+        self.assertEqual(self.m.state()['falhas_baixo'],'1'); self.assertEqual(self.m.state()['falhas_critico'],'1')
+        self.m.run([leitura(19),leitura(15)],http='201')
+        self.assertEqual(len(self.m.calls()),3); self.assertEqual(self.m.state()['critico_avisado'],'1')
+        self.assertEqual(self.m.state()['proxima_baixo'],'0'); self.assertEqual(self.m.state()['proxima_critico'],'0')
+
+    def test_critico_modelo_grupo_e_dry(self):
+        modelo='🚨 *{percentual}%* / {percentual} $HOME $(false) %s\nsegunda linha\n'
+        self.m.conf.update(DESTINO=GROUP,MSG_BATERIA_CRITICA=modelo)
+        p=self.m.run([leitura(15)],dry=True)
+        self.assertIn('[DRY] '+modelo.replace('{percentual}','15'),p.stdout)
+        self.assertEqual(self.m.calls(),[]); self.assertFalse((self.m.home/'.battery-watch.state').exists())
+        self.assertEqual(self.m.state(True)['critico_avisado'],'1')
+        self.m.run([leitura(15)]); self.assertEqual(self.m.calls(),[{'number':GROUP,'text':modelo.replace('{percentual}','15')}])
+
+    def test_critico_configuracao_personalizada(self):
+        self.m.conf.update(LIMIAR_CRITICO='10',LIMIAR_CRITICO_RESET='12')
+        self.m.run([leitura(n) for n in [16,15,10,12,10,13,10]])
+        self.assertEqual(len(self.m.calls()),3)
+        self.assertEqual(self.m.log().count('OK evento=critico'),2)
+
+    def test_critico_configuracao_legada_e_desativada(self):
+        for i,conf in enumerate([dict(LIMIAR_BAIXO='10',LIMIAR_RESET='13'),dict(LIMIAR_CRITICO='0')]):
+            with self.subTest(conf=conf):
+                h=self.m.home/f'legado{i}'; h.mkdir(); m=Monitor(h); m.conf.update(conf); m.run([leitura(10)])
+                self.assertEqual(len(m.calls()),1); self.assertIn('Bateria baixa: 10%',m.calls()[0]['text']); self.assertNotIn('critico_avisado',m.state())
+
+    def test_critico_configuracoes_invalidas(self):
+        for conf in [dict(LIMIAR_CRITICO='abc'),dict(LIMIAR_CRITICO='30'),dict(LIMIAR_CRITICO='-1'),dict(LIMIAR_CRITICO='101'),dict(LIMIAR_CRITICO_RESET='15'),dict(LIMIAR_CRITICO_RESET='100'),dict(LIMIAR_CRITICO_RESET='abc')]:
+            with self.subTest(conf=conf):
+                self.m.conf.pop('LIMIAR_CRITICO',None); self.m.conf.pop('LIMIAR_CRITICO_RESET',None); self.m.conf.update(conf)
+                p=self.m.run([leitura(15)],expected=2); self.assertIn('LIMIAR_CRITICO',p.stderr); self.assertEqual(self.m.calls(),[])
+
 if __name__=='__main__': unittest.main(verbosity=2)

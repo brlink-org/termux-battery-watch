@@ -8,11 +8,14 @@ Funciona **sem root** e **sem cron**. Usa preferencialmente o aplicativo **Termu
 
 | Evento | Condição inicial padrão | Comportamento |
 | --- | --- | --- |
-| Bateria baixa | **30% ou menos**, desconectado ou sem alimentação confirmada | Avisa uma vez; rearma acima de **33%** |
+| Bateria baixa | **30% ou menos**, desconectado, descarregando ou sem alimentação confirmada | Avisa uma vez; rearma acima de **33%** |
+| Bateria crítica | **15% ou menos**, sem carregamento ativo identificado | Avisa uma vez, com prioridade sobre bateria baixa; rearma acima de **18%** |
 | Carregador conectado | Transição para fonte de energia conectada, antes de 100% | Avisa uma vez por conexão detectada; se inferida pelo kernel, usa texto específico |
 | Carga completa | **100%** | Avisa uma vez; rearma abaixo de **98%** |
 
 A verificação ocorre a cada **60 segundos** (configurável). Ao iniciar o monitor com o carregador já conectado ou a carga já completa, esses dois avisos de transição são silenciados. **Bateria baixa** pode gerar aviso imediatamente, incluindo quando a origem da alimentação é desconhecida (mensagem neutra). Um estado `NOT_CHARGING` não significa automaticamente que o cabo esteja desconectado.
+
+O alerta crítico tem estado e espera entre tentativas próprios. Em uma descarga normal, há um aviso em 30% e outro em 15%. Se iniciar ou saltar diretamente para 15% ou menos, o monitor prioriza o crítico e não envia o aviso normal na mesma leitura; ao aceitar o aviso crítico, ambos os estados são registrados juntos. Em 18% ainda não rearma; em 19% rearma independentemente do alerta de 30%. A carga ativa (`CHARGING` com alimentação identificada ou inferida) suspende o aviso crítico. Com `NOT_CHARGING`, estado desconhecido ou descarga, inclusive conectado à energia, o aviso crítico utiliza texto neutro. O mesmo intervalo de leitura e a política de retentativas dos demais eventos continuam aplicáveis.
 
 Na leitura alternativa pelo kernel, uma fonte legível com `online=1` indica alimentação externa; quando todas as fontes `online` visíveis estão legíveis e em zero (sem contradição de carregamento), o monitor considera a alimentação desconectada. Sem dados conclusivos de `online`, `CHARGING` e `DISCHARGING` permitem inferir transições, mas não provar a conexão física. O aviso de carregamento inferido tem texto próprio; `FULL` e `NOT_CHARGING` isolados não rearmam o aviso. Leituras inferidas podem divergir da conexão física, sobretudo ao alternar entre Termux:API e kernel.
 
@@ -102,6 +105,9 @@ DESTINO="5571999999999"
 INTERVALO=60
 LIMIAR_BAIXO=30
 LIMIAR_RESET=33
+# Opcionais: padrões 15% e rearme acima de 18%.
+# LIMIAR_CRITICO=15
+# LIMIAR_CRITICO_RESET=18
 LIMIAR_CHEIO=100
 LIMIAR_CHEIO_RESET=98
 ```
@@ -113,6 +119,8 @@ LIMIAR_CHEIO_RESET=98
 - `INTERVALO`: intervalo entre leituras em segundos.
 - `BATWATCH_LOG_MAX_BYTES`: tamanho máximo de cada log em bytes (padrão 1048576 = 1 MB); são mantidos dois históricos por modo.
 - Limiares: percentuais configuráveis e seus pontos de rearme (**histerese**).
+- `LIMIAR_CRITICO`: limite de bateria crítica, padrão 15, menor que `LIMIAR_BAIXO`; 0 desativa esse evento. Configurações antigas com `LIMIAR_BAIXO` de 15 ou menos mantêm o alerta normal e não habilitam automaticamente o crítico; para habilitá-lo, defina um limite crítico inferior ao normal.
+- `LIMIAR_CRITICO_RESET`: rearme estritamente acima do valor configurado; padrão limite crítico + 3 pontos (até 99), devendo superar o limite crítico e ser menor que 100. Em condições padrão, 19% rearma. Nenhum novo campo é obrigatório.
 
 #### Enviar para um grupo do WhatsApp
 
@@ -129,7 +137,7 @@ Use o identificador real fornecido pela Evolution API para o grupo em que a inst
 
 #### Personalizar as mensagens
 
-Acrescente ao arquivo privado `~/.battery-watch.conf` somente os modelos que deseja alterar. Os seis modelos são opcionais; sem configuração, mantêm-se os textos padrão (incluindo os cinco alertas já existentes e o aviso novo para fonte inferida).
+Acrescente ao arquivo privado `~/.battery-watch.conf` somente os modelos que deseja alterar. Os sete modelos são opcionais; sem configuração, utilizam-se os textos padrão, incluindo o novo alerta crítico e o aviso de fonte inferida.
 
 ```bash
 MSG_BAIXA_DESCONECTADO='🔋 Meu aparelho: bateria em {percentual}%. Conecte o carregador.'
@@ -137,12 +145,13 @@ MSG_BAIXA_CONECTADO='🔋 Bateria baixa: {percentual}% apesar da fonte conectada
 MSG_BAIXA_DESCONHECIDO='🔋 Bateria baixa: {percentual}%. Nao foi possivel confirmar a alimentacao.'
 MSG_CARREGADOR_CONECTADO='🔌 Carregador conectado — bateria em {percentual}%.'
 MSG_CARGA_COMPLETA='✅ Bateria em {percentual}% — carga completa, pode desconectar.'
+MSG_BATERIA_CRITICA='🚨 Bateria crítica: {percentual}%. Verifique a alimentação imediatamente.'
 MSG_CARREGADOR_INFERIDO='🔌 Carregamento detectado — bateria em {percentual}% (fonte inferida).'
 ```
 
 O marcador literal `{percentual}` é substituído pelo percentual da leitura, inclusive quando repetido. Use aspas simples para preservar `$`, `%`, asteriscos, emojis e quebras de linha; o renderizador não executa o texto como código. Variáveis vazias usam o texto padrão. O arquivo de configuração em si é interpretado como Bash e deve ser confiável. Os textos aparecem no log; não inclua tokens ou informações privadas nas mensagens.
 
-Reinicie o monitor após editar a configuração. Teste primeiro com `DRY=1`; nenhum envio real é feito nesse modo. O arquivo de exemplo contém os seis modelos comentados.
+Reinicie o monitor após editar a configuração. Teste primeiro com `DRY=1`; nenhum envio real é feito nesse modo. O arquivo de exemplo contém os sete modelos comentados.
 
 Proteja a configuração:
 
@@ -304,7 +313,7 @@ Em um checkout do repositório, em Linux com Bash, Git, curl, jq, coreutils, uti
 bash tests/test_regressao.sh
 ```
 
-A suíte usa configurações, estado, logs e leituras de bateria isolados em diretórios temporários. A raiz alternativa do kernel é apontada para as amostras por `BATWATCH_SYSFS_ROOT`, nunca para o hardware real; não configure essa variável no uso normal. O `curl` é simulado, exceto em um teste HTTP controlado em `127.0.0.1` com credenciais fictícias. Não há envio ao WhatsApp. Cada caso verifica saídas e efeitos observáveis; falhas produzem código de saída diferente de zero. Para executar um único teste, passe seu nome ao comando (por exemplo `Regressao.test_grupo_dry`). O funcionamento no Android e a entrega por uma instância Evolution real devem ser validados separadamente.
+A suíte usa configurações, estado, logs e leituras de bateria isolados em diretórios temporários. A raiz alternativa do kernel é apontada para as amostras por `BATWATCH_SYSFS_ROOT`, nunca para o hardware real; não configure essa variável no uso normal. O `curl` é simulado, exceto em um teste HTTP controlado em `127.0.0.1` com credenciais fictícias. Não há envio ao WhatsApp. Cada caso verifica saídas e efeitos observáveis; falhas produzem código de saída diferente de zero. Para executar um único teste, passe seu nome ao comando (por exemplo `Regressao.test_grupo_dry`). A suíte também verifica escalonamento 30%/15%, prioridade, histerese, migração de estado, retentativas, configurações antigas, mensagens críticas personalizadas e grupos. O funcionamento no Android e a entrega por uma instância Evolution real devem ser validados separadamente.
 
 ## Referências
 

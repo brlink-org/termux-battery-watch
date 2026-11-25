@@ -8,6 +8,9 @@ DESTINO="5571999999999"  # codigo do pais + DDD + telefone, sem +
 INTERVALO=60
 LIMIAR_BAIXO=30
 LIMIAR_RESET=33
+# Opcionais: padrão crítico de 15% (0 desativa); rearme acima de 18%.
+# LIMIAR_CRITICO=15
+# LIMIAR_CRITICO_RESET=18
 LIMIAR_CHEIO=100
 LIMIAR_CHEIO_RESET=98
 # DRY=1   # somente testes, sem envio real
@@ -22,4 +25,5 @@ LIMIAR_CHEIO_RESET=98
 # MSG_BAIXA_DESCONHECIDO='🔋 Bateria baixa: {percentual}%. Nao foi possivel confirmar a alimentacao.'
 # MSG_CARREGADOR_CONECTADO='🔌 Carregador conectado — bateria em {percentual}%.'
 # MSG_CARGA_COMPLETA='✅ Bateria em {percentual}% — carga completa, pode desconectar.'
+# MSG_BATERIA_CRITICA='🚨 Bateria crítica: {percentual}%. Verifique a alimentação imediatamente.'
 # MSG_CARREGADOR_INFERIDO='🔌 Carregamento detectado — bateria em {percentual}% (fonte inferida).'

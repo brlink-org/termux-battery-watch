@@ -32,6 +32,7 @@ LIMIAR_CHEIO_RESET="${LIMIAR_CHEIO_RESET:-98}"
 [[ -n "${MSG_BAIXA_DESCONHECIDO:-}" ]] || MSG_BAIXA_DESCONHECIDO='🔋 Bateria baixa: {percentual}%. Nao foi possivel confirmar a alimentacao.'
 [[ -n "${MSG_CARREGADOR_CONECTADO:-}" ]] || MSG_CARREGADOR_CONECTADO='🔌 Carregador conectado — bateria em {percentual}%.'
 [[ -n "${MSG_CARGA_COMPLETA:-}" ]] || MSG_CARGA_COMPLETA='✅ Bateria em {percentual}% — carga completa, pode desconectar.'
+[[ -n "${MSG_BATERIA_CRITICA:-}" ]] || MSG_BATERIA_CRITICA='🚨 Bateria crítica: {percentual}%. Verifique a alimentação imediatamente.'
 [[ -n "${MSG_CARREGADOR_INFERIDO:-}" ]] || MSG_CARREGADOR_INFERIDO='🔌 Carregamento detectado — bateria em {percentual}% (fonte inferida).'
 
 renderizar_mensagem() {
@@ -170,6 +171,24 @@ done
 (( 10#$INTERVALO >= 1 )) || erro 'INTERVALO deve ser maior que zero'
 (( 10#$LIMIAR_BAIXO <= 100 && 10#$LIMIAR_RESET <= 100 && 10#$LIMIAR_CHEIO <= 100 && 10#$LIMIAR_CHEIO_RESET <= 100 )) || erro 'limiares devem estar entre 0 e 100'
 (( 10#$LIMIAR_RESET > 10#$LIMIAR_BAIXO )) || erro 'LIMIAR_RESET precisa superar LIMIAR_BAIXO'
+# Configurações antigas com limiar baixo <= 15 continuam válidas: o padrão
+# crítico fica desativado nesse caso, a menos que seja configurado explicitamente.
+if [[ -z "${LIMIAR_CRITICO:-}" ]]; then
+  LIMIAR_CRITICO=15
+  (( 10#$LIMIAR_BAIXO > 15 )) || LIMIAR_CRITICO=0
+fi
+[[ "$LIMIAR_CRITICO" =~ ^[0-9]{1,3}$ ]] || erro 'LIMIAR_CRITICO deve ser um inteiro de 0 a 100'
+(( 10#$LIMIAR_CRITICO <= 100 )) || erro 'LIMIAR_CRITICO deve estar entre 0 e 100'
+(( 10#$LIMIAR_CRITICO == 0 || 10#$LIMIAR_CRITICO < 10#$LIMIAR_BAIXO )) ||
+  erro 'LIMIAR_CRITICO precisa ser menor que LIMIAR_BAIXO (0 desativa)'
+if [[ -z "${LIMIAR_CRITICO_RESET:-}" ]]; then
+  LIMIAR_CRITICO_RESET=$(( 10#$LIMIAR_CRITICO + 3 ))
+  (( LIMIAR_CRITICO_RESET < 100 )) || LIMIAR_CRITICO_RESET=99
+fi
+[[ "$LIMIAR_CRITICO_RESET" =~ ^[0-9]{1,3}$ ]] || erro 'LIMIAR_CRITICO_RESET deve ser um inteiro de 0 a 100'
+# O rearme usa comparação estrita: 100 nunca poderia rearmar.
+(( 10#$LIMIAR_CRITICO_RESET > 10#$LIMIAR_CRITICO && 10#$LIMIAR_CRITICO_RESET < 100 )) ||
+  erro 'LIMIAR_CRITICO_RESET precisa superar LIMIAR_CRITICO e ser menor que 100'
 (( 10#$LIMIAR_CHEIO_RESET < 10#$LIMIAR_CHEIO )) || erro 'LIMIAR_CHEIO_RESET precisa ser menor que LIMIAR_CHEIO'
 [[ "$DRY" == 0 || "$DRY" == 1 ]] || erro 'DRY deve ser 0 ou 1'
 [[ "$LOG_MAX_BYTES" =~ ^[0-9]{1,9}$ ]] &&
@@ -255,7 +274,9 @@ fi
 
 ler() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1; }
 grava() {
-  local k="$1" v="$2" tmp linha nome alterado=0
+  local k v tmp linha nome alterado=0
+  # A interface interna exige pares completos para evitar gravação parcial.
+  (( $# >= 2 && $# % 2 == 0 )) || erro 'grava exige pares chave/valor'
   local -A campos=()
   # Mantem a ultima ocorrencia valida de cada chave, descartando linhas ruins.
   while IFS= read -r linha || [[ -n "$linha" ]]; do
@@ -266,11 +287,16 @@ grava() {
     [[ ! ${campos[$nome]+existe} ]] || alterado=1
     campos["$nome"]="${BASH_REMATCH[2]}"
   done < "$STATE" || erro 'falha ao ler estado'
+  # Pares chave/valor do mesmo evento são persistidos em uma única substituição.
   # Mesmo valor não requer escrita, exceto se houver dados a normalizar.
-  if [[ "$alterado" == 0 && ${campos[$k]+existe} && "${campos[$k]}" == "$v" ]]; then
-    return 0
-  fi
-  campos["$k"]="$v"
+  while (( $# )); do
+    k="$1"; v="$2"; shift 2
+    if [[ ! ${campos[$k]+existe} || "${campos[$k]}" != "$v" ]]; then
+      alterado=1
+      campos["$k"]="$v"
+    fi
+  done
+  [[ "$alterado" == 1 ]] || return 0
   tmp="$(mktemp "${STATE}.XXXXXX")" || erro 'falha ao criar estado temporário'
   for nome in "${!campos[@]}"; do
     printf '%s=%s\n' "$nome" "${campos[$nome]}" >> "$tmp" ||
@@ -334,7 +360,7 @@ registrar_erro_envio() {
 
 # A troca de chave invalida a espera por autenticacao, sem persistir hash de token.
 if [[ "$TOKEN_ALTERADO" == 1 ]]; then
-  for evento in baixo plugado cheio; do limpar_tentativas "$evento"; done
+  for evento in baixo critico plugado cheio; do limpar_tentativas "$evento"; done
 fi
 
 envia() {
@@ -416,9 +442,21 @@ while :; do
     PRIMEIRA=0
   fi
 
+  # Crítico tem prioridade sobre o aviso normal, inclusive ao iniciar já em 15%.
+  # Fonte conectada sem carga ativa também exige atenção; o texto é neutro.
+  if (( 10#$LIMIAR_CRITICO > 0 && 10#$CAP <= 10#$LIMIAR_CRITICO )); then
+    if [[ "$PLUGADO" != 1 || "$STATUS" != CHARGING ]] &&
+       [[ "$(ler critico_avisado)" != 1 ]]; then
+      renderizar_mensagem "$MSG_BATERIA_CRITICA" "$CAP"
+      if pode_tentar critico && envia critico "$aviso"; then
+        # O aviso urgente também satisfaz o de baixa neste episódio.
+        grava critico_avisado 1 baixo_avisado 1
+        limpar_tentativas baixo
+      fi
+    fi
   # Mesmo sem fonte identificada, bateria baixa precisa gerar um aviso.
   # Com fonte conectada e DISCHARGING, avisar que a carga nao acompanha o uso.
-  if (( 10#$CAP <= 10#$LIMIAR_BAIXO )) &&
+  elif (( 10#$CAP <= 10#$LIMIAR_BAIXO )) &&
      [[ "$PLUGADO" != 1 || "$STATUS" == DISCHARGING ]] &&
      [[ "$(ler baixo_avisado)" != 1 ]]; then
     if [[ "$PLUGADO" == 1 ]]; then
@@ -429,6 +467,11 @@ while :; do
       renderizar_mensagem "$MSG_BAIXA_DESCONHECIDO" "$CAP"
     fi
     if pode_tentar baixo && envia baixo "$aviso"; then grava baixo_avisado 1; fi
+  fi
+  # Rearme crítico independente do rearme de bateria baixa.
+  if (( 10#$LIMIAR_CRITICO > 0 && 10#$CAP > 10#$LIMIAR_CRITICO_RESET )); then
+    grava critico_avisado 0
+    limpar_tentativas critico
   fi
   if (( 10#$CAP > 10#$LIMIAR_RESET )); then
     grava baixo_avisado 0
